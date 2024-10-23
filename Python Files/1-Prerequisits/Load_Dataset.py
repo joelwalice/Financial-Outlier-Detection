@@ -12,6 +12,8 @@ from scipy.spatial.distance import cdist
 from scipy.stats import multivariate_normal
 from sklearn.neighbors import KernelDensity
 from sklearn.neighbors import LocalOutlierFactor
+from sklearn.cluster import DBSCAN
+from sklearn.decomposition import PCA
 
 df_raw = pd.read_csv('creditcard.csv')
 df=df_raw.drop(['Time'], axis=1)
