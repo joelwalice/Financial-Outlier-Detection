@@ -1,92 +1,179 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
+from collections import Counter
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
 from sklearn.cluster import DBSCAN
-from sklearn.neighbors import LocalOutlierFactor
+from sklearn.neighbors import KernelDensity
+from pyod.models.iforest import IForest
+from sklearn.decomposition import PCA
 
-# Load the dataset
-@st.cache
-def load_data():
-    df_raw = pd.read_csv('Dataset/creditcard.csv')
-    df = df_raw.drop(['Time'], axis=1)
+def IQR_method(df, features):
+    outlier_details = []
+    total_outliers = 0
+
+    for column in features:
+        Q1 = np.percentile(df[column], 25)
+        Q3 = np.percentile(df[column], 75)
+        IQR = Q3 - Q1
+        outlier_step = 1.5 * IQR
+        lower_bound = Q1 - outlier_step
+        upper_bound = Q3 + outlier_step
+
+        below_bound = df[df[column] < lower_bound].shape[0]
+        above_bound = df[df[column] > upper_bound].shape[0]
+        total_column_outliers = below_bound + above_bound
+        total_outliers += total_column_outliers
+
+        outlier_percentage = (total_column_outliers / df.shape[0]) * 100
+
+        outlier_details.append({
+            "Feature": column,
+            "Lower Bound": lower_bound,
+            "Upper Bound": upper_bound,
+            "Outliers Below Bound": below_bound,
+            "Outliers Above Bound": above_bound,
+            "Total Outliers": total_column_outliers,
+            "Outlier Percentage": round(outlier_percentage, 2)
+        })
+
+    return outlier_details, total_outliers
+
+def detect_outliers_lof(df, features, n_neighbors=30, contamination=0.005):
+    X = df[features].values
+    lof = LocalOutlierFactor(n_neighbors=n_neighbors, contamination=contamination)
+    outlier_labels = lof.fit_predict(X)
+    return np.where(outlier_labels == -1)[0]
+
+def detect_outliers_inflo(df, features, k=20, threshold=0.75):
+    X = df[features].values
+    nbrs = NearestNeighbors(n_neighbors=k)
+    nbrs.fit(X)
+    distances, indices = nbrs.kneighbors(X)
+    local_densities = np.zeros(X.shape[0])
+
+    for i in range(X.shape[0]):
+        local_densities[i] = 1 / (np.mean(distances[i][1:]) + 1e-5)
+
+    influences = np.zeros(X.shape[0])
+    for i in range(X.shape[0]):
+        influence = 0
+        for j in indices[i][1:]:
+            influence += local_densities[j]
+        influences[i] = influence
+
+    threshold_value = np.percentile(influences, threshold * 100)
+    outlier_mask = influences < threshold_value
+
+    df['INFLO_Score'] = influences
+    df['Is_Outlier_INFLO'] = outlier_mask.astype(int)
+
     return df
 
-def preprocess_data(df):
-    scaler = StandardScaler()
-    df_scaled = pd.DataFrame(scaler.fit_transform(df), columns=df.columns)
-    return df_scaled
+def detect_outliers_dbscan(df, features, eps=0.5, min_samples=5):
+    X = df[features].values
+    dbscan = DBSCAN(eps=eps, min_samples=min_samples)
+    labels = dbscan.fit_predict(X)
+    return np.where(labels == -1)[0]
 
-def dbscan_outlier_detection(df, eps, min_samples):
-    X = df.values
-    db = DBSCAN(eps=eps, min_samples=min_samples).fit(X)
-    df['DBSCAN_Cluster'] = db.labels_
-    df['DBSCAN_Outlier'] = (df['DBSCAN_Cluster'] == -1).astype(int)
-    return df
+def abod(data, k=5):
+    n_samples = data.shape[0]
+    abod_scores = np.zeros(n_samples)
+    nbrs = NearestNeighbors(n_neighbors=k + 1).fit(data)
+    distances, indices = nbrs.kneighbors(data)
+    for i in range(n_samples):
+        neighbors = data[indices[i, 1:]]
+        angles = []
 
-def lof_outlier_detection(df, n_neighbors):
-    lof = LocalOutlierFactor(n_neighbors=n_neighbors)
-    outlier_labels = lof.fit_predict(df)
-    df['LOF_Score'] = -lof.negative_outlier_factor_
-    df['LOF_Outlier'] = (outlier_labels == -1).astype(int)
-    return df
+        for j in range(len(neighbors)):
+            for l in range(j + 1, len(neighbors)):
+                vec1 = neighbors[j] - data[i]
+                vec2 = neighbors[l] - data[i]
+                cos_theta = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+                cos_theta = np.clip(cos_theta, -1.0, 1.0)
+                angle = np.arccos(cos_theta)
+                angles.append(angle)
+
+        abod_scores[i] = np.var(angles) if angles else 0.0
+    return np.argsort(-abod_scores)[:int(len(data) * 0.05)]
+
+def compute_ldof(X, k):
+    knn = NearestNeighbors(n_neighbors=k)
+    knn.fit(X)
+    distances, indices = knn.kneighbors(X)
+    ldof_scores = []
+    for i in range(len(X)):
+        dist_to_neighbors = np.mean(distances[i])
+
+        neighbors = X[indices[i]]
+        neighbor_knn = NearestNeighbors(n_neighbors=k)
+        neighbor_knn.fit(neighbors)
+        neighbor_distances, _ = neighbor_knn.kneighbors(neighbors)
+        avg_pairwise_dist = np.mean(neighbor_distances)
+
+        ldof = dist_to_neighbors / avg_pairwise_dist if avg_pairwise_dist > 0 else 0
+        ldof_scores.append(ldof)
+
+    return np.argsort(ldof_scores)[-int(len(ldof_scores) * 0.05):]
 
 def main():
     st.title("Outlier Detection Dashboard")
+    st.write("Upload a dataset and select outlier detection methods to visualize the results.")
 
-    df = load_data()
-    st.write("### Raw Data", df.head())
+    uploaded_file = st.file_uploader("Upload your dataset (CSV format)", type="csv")
+    
+    if uploaded_file:
+        df = pd.read_csv(uploaded_file)
+        st.write("Dataset Overview:")
+        st.write(df.head())
 
-    feature_list = df.columns.tolist()
-    selected_features = st.multiselect("Select features for analysis:", feature_list, default=feature_list)
+        features = st.multiselect("Select Features for Outlier Detection", df.columns)
 
-    if st.checkbox("Show histograms for selected features"):
-        st.write("### Histograms")
-        for feature in selected_features:
-            fig, ax = plt.subplots()
-            sns.histplot(df[feature], bins=50, kde=True, ax=ax)
-            ax.set_title(f"Histogram of {feature}")
-            st.pyplot(fig)
+        methods = st.multiselect("Select Outlier Detection Methods", 
+                                 ["IQR Method", "LOF", "INFLO", "DBSCAN", "ABOD", "LDOF"])
 
-    df_preprocessed = preprocess_data(df[selected_features])
+        if "IQR Method" in methods:
+            st.subheader("IQR Method")
+            outlier_details, total_outliers = IQR_method(df, features)
+            st.write(f"Total outliers across all selected features: {total_outliers}")
+            outlier_df = pd.DataFrame(outlier_details)
+            st.dataframe(outlier_df)
 
-    st.sidebar.title("DBSCAN Parameters")
-    eps = st.sidebar.slider("Epsilon (eps)", min_value=0.1, max_value=5.0, value=0.5, step=0.1)
-    min_samples = st.sidebar.slider("Minimum Samples", min_value=1, max_value=20, value=5, step=1)
+        if "LOF" in methods:
+            st.subheader("Local Outlier Factor (LOF)")
+            contamination = st.slider("Contamination", 0.001, 0.05, 0.005, key="lof_contamination")
+            lof_outliers = detect_outliers_lof(df, features, contamination=contamination)
+            st.write("LOF Outliers detected at indices:", lof_outliers)
 
-    st.sidebar.title("LOF Parameters")
-    n_neighbors = st.sidebar.slider("Neighbors (k)", min_value=1, max_value=50, value=20, step=1)
+        if "INFLO" in methods:
+            st.subheader("Influenced Outlierness Factor (INFLO)")
+            k = st.slider("Number of Neighbors (k)", 5, 50, 20, key="inflo_k")
+            threshold = st.slider("Outlier Threshold", 0.5, 1.0, 0.9, key="inflo_threshold")
+            inflo_outliers = detect_outliers_inflo(df, features, k=k, threshold=threshold)
+            st.write("INFLO Outliers detected at indices:", inflo_outliers)
 
-    df_with_dbscan = dbscan_outlier_detection(df_preprocessed.copy(), eps=eps, min_samples=min_samples)
-    st.write("### DBSCAN Results")
-    st.write(df_with_dbscan[['DBSCAN_Cluster', 'DBSCAN_Outlier']])
+        if "DBSCAN" in methods:
+            st.subheader("DBSCAN")
+            eps = st.slider("Epsilon", 0.1, 1.0, 0.5, key="dbscan_eps")
+            min_samples = st.slider("Min Samples", 1, 10, 5, key="dbscan_min_samples")
+            dbscan_outliers = detect_outliers_dbscan(df, features, eps=eps, min_samples=min_samples)
+            st.write("DBSCAN Outliers detected at indices:", dbscan_outliers)
 
-    df_with_lof = lof_outlier_detection(df_preprocessed.copy(), n_neighbors=n_neighbors)
-    st.write("### LOF Results")
-    st.write(df_with_lof[['LOF_Score', 'LOF_Outlier']])
+        if "ABOD" in methods:
+            st.subheader("Angle-Based Outlier Detection (ABOD)")
+            k = st.slider("Number of Neighbors (k)", 5, 50, 5)
+            abod_outliers = abod(df[features].values, k=k)
+            st.write("ABOD Outliers detected at indices:", abod_outliers)
 
-    st.write("### DBSCAN vs LOF Outliers")
-    fig, ax = plt.subplots()
-    sns.scatterplot(
-        x=df_with_dbscan[selected_features[0]],
-        y=df_with_dbscan[selected_features[1]],
-        hue=df_with_dbscan['DBSCAN_Outlier'],
-        palette={0: 'blue', 1: 'red'},
-        ax=ax,
-        label="DBSCAN"
-    )
-    sns.scatterplot(
-        x=df_with_lof[selected_features[0]],
-        y=df_with_lof[selected_features[1]],
-        hue=df_with_lof['LOF_Outlier'],
-        palette={0: 'blue', 1: 'orange'},
-        ax=ax,
-        marker='X',
-        label="LOF"
-    )
-    ax.set_title("Outliers Detected by DBSCAN and LOF")
-    st.pyplot(fig)
+        if "LDOF" in methods:
+            st.subheader("Local Density-based Outlier Factor (LDOF)")
+            k = st.slider("Number of Neighbors (k)", 5, 50, 20)
+            ldof_outliers = compute_ldof(df[features].values, k=k)
+            st.write("LDOF Outliers detected at indices:", ldof_outliers)
 
 if __name__ == "__main__":
     main()
