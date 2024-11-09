@@ -4,6 +4,5 @@ pandas
 seaborn
 matplotlib
 scikit-learn
-sklearn
 yfinance
 datetime
