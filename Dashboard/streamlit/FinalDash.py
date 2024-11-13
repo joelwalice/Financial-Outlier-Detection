@@ -7,6 +7,9 @@ from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
 from sklearn.cluster import DBSCAN
 import yfinance as yf
 from datetime import datetime, timedelta
+from sklearn.decomposition import PCA
+from scipy.spatial.distance import mahalanobis
+from scipy.stats import chi2
 
 def IQR_method(df, features):
     outlier_details = []
@@ -35,6 +38,39 @@ def IQR_method(df, features):
             "Outlier Percentage": round(outlier_percentage, 2)
         })
     return outlier_details, total_outliers
+
+def stddev_method(df, features, threshold=3):
+    outlier_counts = {}
+    for column in features:
+        mean = df[column].mean()
+        std = df[column].std()
+        outliers = df[(df[column] < mean - threshold * std) | (df[column] > mean + threshold * std)]
+        outlier_counts[column] = len(outliers)
+    return outlier_counts
+
+def zscore_method(df, features, threshold=3):
+    outlier_counts = {}
+    for column in features:
+        z_scores = (df[column] - df[column].mean()) / df[column].std()
+        outliers = z_scores[abs(z_scores) > threshold]
+        outlier_counts[column] = len(outliers)
+    return outlier_counts
+
+def modified_zscore_method(df, features, threshold=2.0):
+    outlier_counts = {}
+    for column in features:
+        median = df[column].median()
+        mad = (abs(df[column] - median)).median()
+        modified_z_scores = 0.6745 * (df[column] - median) / mad
+        outliers = modified_z_scores[abs(modified_z_scores) > threshold]
+        outlier_counts[column] = len(outliers)
+    return outlier_counts
+
+def plot_distribution(df, column):
+    plt.figure(figsize=(10, 6))
+    sns.histplot(df[column], kde=True, bins=30, color="blue")
+    plt.title(f"Distribution of {column}")
+    st.pyplot(plt)
 
 def detect_outliers_lof(df, features, contamination=0.005):
     X = df[features].values
@@ -129,6 +165,24 @@ def plot_outlier_scatter(df, method, outliers, feature1, feature2):
     plt.ylabel(feature2)
     st.pyplot(plt)
 
+def pca_outliers(df, features, n_components=2, threshold=3):
+    pca = PCA(n_components=n_components)
+    principal_components = pca.fit_transform(df[features])
+    reconstruction = pca.inverse_transform(principal_components)
+    reconstruction_error = np.sqrt(np.sum((df[features].values - reconstruction) ** 2, axis=1))
+    outliers = np.where(reconstruction_error > threshold)[0]
+    return outliers, reconstruction_error
+
+def mahalanobis_outliers(df, features, threshold=3.0):
+    mean_vector = np.mean(df[features], axis=0)
+    covariance_matrix = np.cov(df[features], rowvar=False)
+    inv_cov_matrix = np.linalg.inv(covariance_matrix)
+    mahal_distances = df[features].apply(
+        lambda row: mahalanobis(row, mean_vector, inv_cov_matrix), axis=1)
+    critical_value = chi2.ppf((1 - (1 / threshold)), len(features))
+    outliers = mahal_distances[mahal_distances > critical_value].index
+    return outliers, mahal_distances
+
 def plot_outlier_distribution(outlier_scores, method_name):
     plt.figure(figsize=(8, 4))
     sns.histplot(outlier_scores, kde=True, color='purple')
@@ -137,7 +191,6 @@ def plot_outlier_distribution(outlier_scores, method_name):
     plt.ylabel("Frequency")
     st.pyplot(plt)
 
-# Main Streamlit App
 def main():
     st.set_page_config(page_title="Enhanced Outlier Detection Dashboard", layout="wide")
     st.title("Enhanced Outlier Detection Dashboard")
@@ -150,7 +203,7 @@ def main():
         if uploaded_file:
             df = pd.read_csv(uploaded_file)
             features = st.multiselect("Select Features for Outlier Detection", df.columns)
-            methods = st.multiselect("Select Outlier Detection Methods", ["IQR Method", "LOF", "DBSCAN", "INFLO", "ABOD", "LDOF"])
+            methods = st.multiselect("Select Outlier Detection Methods", ["IQR Method", "Standard Deviation", "Z-Score", "LOF", "DBSCAN", "INFLO", "ABOD", "LDOF", "PCA Method", "Mahalanobis Distance"])
 
     if realtime:
         st.write("Real-time anomaly detection is enabled.")
@@ -205,7 +258,7 @@ def main():
             if "LDOF" in methods:
                 ldof_k = st.slider("LDOF k", 5, 50, 5)
                 
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["IQR Method", "LOF", "DBSCAN", "INFLO", "ABOD", "LDOF"])
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(["IQR Method", "Standard Deviation","Z-Score", "LOF", "DBSCAN", "INFLO", "ABOD", "LDOF", "PCA Method", "Mahalanobis Distance"])
         
         with tab1:
             if "IQR Method" in methods:
@@ -213,41 +266,78 @@ def main():
                 outlier_details, total_outliers = IQR_method(df, features)
                 st.write(f"Total Outliers Detected: {total_outliers}")
                 st.write(outlier_details)
-
         with tab2:
+            if "Standard Deviation" in methods:
+                threshold = st.slider("Set threshold (Standard Deviations)", 1, 5, 3)
+                outliers = stddev_method(df, features, threshold)
+                st.write(f"Total Outliers Detected:")
+                st.write(outliers)
+        with tab3:
+            if "Z-Score" in methods:
+                threshold = st.slider("Set threshold (Z-Score)", 1, 5, 3)
+                outliers = zscore_method(df, features, threshold)
+                st.write(f"Total Outliers Detected using Z-Score:")
+                st.write(outliers)
+                threshold = st.slider("Set threshold (Modified Z-Score)", 3.0, 5.0, 3.5, step=0.1)
+                updated_outliers = modified_zscore_method(df, features, threshold)
+                st.write(f"Total Outliers Detected using Modified Z-Score: ")
+                st.write(updated_outliers)
+        with tab4:
             if "LOF" in methods:
                 st.subheader("LOF Method")
                 lof_outliers = detect_outliers_lof(df, features, lof_contamination)
                 st.write(f"Outliers detected: {len(lof_outliers)}")
                 plot_outlier_scatter(df, "LOF", lof_outliers, features[0], features[1])
                 
-        with tab3:
+        with tab5:
             if "DBSCAN" in methods:
                 st.subheader("DBSCAN Method")
                 dbscan_outliers = detect_outliers_dbscan(df, features, dbscan_eps, dbscan_min_samples)
                 st.write(f"Outliers detected: {len(dbscan_outliers)}")
                 plot_outlier_scatter(df, "DBSCAN", dbscan_outliers, features[0], features[1])
 
-        with tab4:
+        with tab6:
             if "INFLO" in methods:
                 st.subheader("INFLO Method")
                 df_inflo = detect_outliers_inflo(df, features, k=inflo_k, threshold=inflo_threshold)
                 st.write(f"Outliers detected: {df_inflo[df_inflo['Is_Outlier_INFLO'] == 1].shape[0]}")
                 plot_outlier_distribution(df_inflo['INFLO_Score'], "INFLO")
 
-        with tab5:
+        with tab7:
             if "ABOD" in methods:
                 st.subheader("ABOD Method")
                 abod_outliers = abod(df[features].values)
                 st.write(f"Outliers detected: {len(abod_outliers)}")
                 plot_outlier_scatter(df, "ABOD", abod_outliers, features[0], features[1])
 
-        with tab6:
+        with tab8:
             if "LDOF" in methods:
                 st.subheader("LDOF Method")
                 ldof_outliers = compute_ldof(df[features].values, ldof_k)
                 st.write(f"Outliers detected: {len(ldof_outliers)}")
                 plot_outlier_distribution(ldof_outliers, "LDOF")
-
+        with tab9:
+            if "PCA Method" in methods:
+                st.subheader("PCA Method")
+                if len(features) > 1:
+                    n_components = st.slider("Number of Components", 1, len(features), min(2, len(features)))
+                    pca_threshold = st.slider("PCA Outlier Threshold", 1, 10, 3)
+                    try:
+                        pca_outliers_detected, pca_error = pca_outliers(df, features, n_components, pca_threshold)
+                        st.write(f"Outliers detected using PCA: {len(pca_outliers_detected)}")
+                        st.line_chart(pca_error, width=0, height=400)
+                        plot_outlier_scatter(df, "PCA", pca_outliers_detected, features[0], features[1])
+                    except Exception as e:
+                        st.error(f"Error in PCA: {e}")
+            else:
+                st.warning("Select at least two features for PCA.")
+        with tab10:
+            if "Mahalanobis Distance" in methods:
+                st.subheader("Mahalanobis Distance Method")
+                maha_threshold = st.slider("Threshold for Mahalanobis Distance", 2.0, 5.0, 3.0)
+                maha_outliers_detected, maha_distances = mahalanobis_outliers(df, features, maha_threshold)
+                st.write(f"Outliers detected using Mahalanobis Distance: {len(maha_outliers_detected)}")
+                st.line_chart(maha_distances, width=0, height=400)
+                plot_outlier_scatter(df, "Mahalanobis Distance", maha_outliers_detected, features[0], features[1])
 if __name__ == "__main__":
     main()

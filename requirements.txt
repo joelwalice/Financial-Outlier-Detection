@@ -1,8 +1,0 @@
-streamlit
-numpy
-pandas
-seaborn
-matplotlib
-scikit-learn
-yfinance
-datetime
